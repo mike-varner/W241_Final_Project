@@ -1,0 +1,324 @@
+---
+title: "Final Project 241"
+output: pdf_document
+---
+  
+```{r Lib Imports}
+library(readxl)
+library(tidyverse)
+library(data.table)
+library(ggplot2)
+library(sandwich)
+library(lmtest)
+library(stargazer)
+library(dplyr)
+knitr::opts_chunk$set(dpi = 300)
+set.seed(1)
+```
+
+```{r Raw Data Imports}
+#Ryan bros data
+ryan_d0 <- data.table(read_excel('data/order 03020303.xlsx'))
+ryan_d1 <- data.table(read_excel('data/order 03040305.xlsx'))
+ryan_d2 <- data.table(read_excel('data/order 03160317.xlsx'))
+ryan_d3 <- data.table(read_excel('data/order 03250326.xlsx'))
+
+#Mercury data
+mercury_d <- data.table(read_excel('data/MERCURY CAFE transactions-2023-03-17-2023-03-17.xlsx'))
+```
+
+```{r Ryan Bros Data Cleaning}
+#define function to clean each individual day
+clean_data <- function(data_table, condition) {
+  # these columns don't seem useful, we can confirm
+  columns_to_drop <- c("Order ID", "Invoice Number", "Order Number",
+                       "Order Employee ID", "Order Employee Custom ID",
+                       "Currency", "Service Charge", "Payments Total",
+                       "Payment Note", "Refunds Total", "Manual Refunds Total",
+                       "Credit Card Auth Code", "Credit Card Transaction ID",
+                       "Order Payment State")
+  data_table[, (columns_to_drop) := NULL]
+  
+  # standardize column names
+  new_column_names <- c("order_date", "order_type", "cashier_name", "note",
+                        "tax", "tip", "discount", "total", "tender")
+  setnames(data_table, old = names(data_table), new = new_column_names)
+  
+  # create a column to know what percent of order the tip was
+  data_table[, tip_percent := tip/total * 100]
+  
+  # denote the treatment/control group
+  data_table$treat <- condition
+  data_table$condition <- ifelse(data_table$treat == 1, "Treatment", "Control")
+
+  # breakout the order_date column
+  data_table[, order_date := gsub(" PST", "", order_date)]
+  data_table[, order_date := as.POSIXct(order_date, format = "%d-%b-%Y %I:%M %p")]
+  data_table[, day_of_week := weekdays(as.Date(data_table$order_date))]
+  data_table[, is_weekend := ifelse(day_of_week %in% c("Saturday", "Sunday"), 1, 0)]
+
+  #only keep card related transactions
+  #data_table <- data_table[tender != "Cash"]
+  data_table <- data_table[tender %in% c("Credit Card", "Debit Card")]
+  
+  #identify if a reward related transaction and code NAs as 0
+  data_table <- data_table %>% mutate(is_reward = +str_detect(note, "reward"))
+  data_table$is_reward[is.na(data_table$is_reward)] <- 0
+  
+  #anonymize cashier name
+  data_table$cashier_name_clean <- fct_anon(data_table$cashier_name, prefix = "_")
+  
+  #create a store dummy variable
+  data_table[, is_ryan := 1]
+  
+  return(data_table)
+}
+
+#clean control and treatment data
+ryan_treat_1 <- clean_data(ryan_d0, 1)  
+ryan_control_1 <- clean_data(ryan_d1, 0)
+ryan_control_2 <- clean_data(ryan_d2, 0)
+ryan_treat_2 <- clean_data(ryan_d3, 1)
+
+#combine control and treatment
+ryan_final <- rbind(ryan_treat_1, ryan_control_1, ryan_control_2, ryan_treat_2)
+#unique(ryan_final$tender)
+```
+
+```{r Mercury Data Cleaning}
+#Drop cash transactions
+mercury_d <- mercury_d[Cash == 0]
+
+#Format time
+mercury_d$hour_min <- format(as.POSIXct(mercury_d$Time), format = "%H:%M")
+
+#Drop transactions before 9:06am
+mercury_d <- mercury_d[hour_min > "09:06"]
+
+#Assign treatment vs control 
+mercury_d$condition <- ifelse(mercury_d$hour_min < "09:06", "Control",
+                   ifelse(mercury_d$hour_min < "10:25", "Treatment", 
+                          ifelse(mercury_d$hour_min < "11:41", "Control", 
+                                 ifelse(mercury_d$hour_min < "12:50", "Treatment", "Control"))))
+
+#Drop unnecessary columns
+columns_to_drop <- c("Date", "Refund Reason", "Net Sales", "Cash", "Time")
+mercury_d[, (columns_to_drop) := NULL]
+
+#Standardize column names
+new_column_names <- c("gross_sales", "tip",
+                        "total_collected", "card", "card_entry_methods", 
+                        "net_total", "card_brand", "hour_min", "condition")
+setnames(mercury_d, old = names(mercury_d), new = new_column_names)
+
+#Calculate tip percentage
+mercury_d$tip_percent <- round((mercury_d$tip / mercury_d$total_collected)*100, digits=0)
+
+#Dummy version of treatment/control
+mercury_d$treat <- ifelse(mercury_d$condition == "Treatment", 1, 0)
+
+#create a store dummy variable
+mercury_d[, is_ryan := 0]
+```
+
+```{r Combine Store Data}
+data_final <- rbind(ryan_final, mercury_d, fill=T)
+
+#create an index
+data_final$id <- seq.int(nrow(data_final))
+
+# colnames(mercury_d)
+# colnames(ryan_final)
+# common_cols <- c("tip_percent", "treat", "condition", "is_ryan")
+```
+
+```{r Combine Store Dat2}
+table(data_final$tender)
+
+data_final <- rbind(ryan_final, mercury_d, fill=T)
+
+data_final$tip_dummy <- ifelse(data_final$tip_percent > 0 ,1,0)
+
+#data_final <- data_final[tip_percent > 0, ]
+
+table(data_final[is_ryan == 0, ]$condition, data_final[is_ryan == 0, ]$tip_dummy)
+
+prop_test <- prop.test(x = c(12, 8), n = c(25, 39), 
+                            alternative = "two.sided", 
+                            conf.level = 0.95)
+
+table(data_final$is_ryan, data_final$tip_dummy)
+
+aggregate(data_final$tip_percent, list(data_final$condition), FUN=sd)
+
+ryan_subset <- data_final[is_ryan == 1, c("treat", "cashier_name", "is_reward", "order_type", "day_of_week")]
+ryan_subset <- as.data.frame(unclass(ryan_subset),stringsAsFactors=TRUE)
+ryan_subset <- data.frame(ryan_subset[ , ! colnames(ryan_subset) %in% "cashier_name"],model.matrix( ~ cashier_name - 1, ryan_subset))
+#cor(ryan_subset)
+
+table(ryan_subset$treat, ryan_subset$is_reward)
+```
+
+```{r Regressions, results = 'asis'}
+#base model to determine treatment effect
+model_0 <- lm(tip_percent ~ treat, data=data_final)
+#compute robust standard errors
+model_0.vcovHC <- vcovHC(model_0, type = "HC1")
+rse_model_0 <- sqrt(diag(model_0.vcovHC))
+
+#base model to determine if a significant interaction effect exists for treatment and location
+model_1 <- lm(tip_percent ~ treat + is_ryan + treat*is_ryan, data=data_final)
+#compute robust standard errors
+model_1.vcovHC <- vcovHC(model_1, type = "HC1")
+rse_model_1 <- sqrt(diag(model_1.vcovHC))
+#given the interaction effect of treatment and location is significant, observe each separately
+
+#Base: Ryan Bros
+model_2 <- data_final[is_ryan == 1, lm(tip_percent ~ treat)]
+model_2.vcovHC <- vcovHC(model_2, type = "HC1")
+rse_model_2 <- sqrt(diag(model_2.vcovHC))
+
+#Base: Mercury
+model_3 <- data_final[is_ryan == 0, lm(tip_percent ~ treat)]
+model_3.vcovHC <- vcovHC(model_3,type = "HC1")
+rse_model_3 <- sqrt(diag(model_3.vcovHC))
+
+#Full: Ryan Bros
+model_4 <- data_final[is_ryan == 1, lm(tip_percent ~ treat + order_type + cashier_name_clean + day_of_week + is_reward + tender)]
+model_4.vcovHC <- vcovHC(model_4, type = "HC1")
+rse_model_4 <- sqrt(diag(model_4.vcovHC))
+
+#Full: Mercury
+model_5 <- data_final[is_ryan == 0, lm(tip_percent ~ treat + card_entry_methods + card_brand)]
+model_5.vcovHC <- vcovHC(model_5, type = "HC1")
+rse_model_5 <- sqrt(diag(model_5.vcovHC))
+
+#Full: Residuals model
+model_ryan_res <- data_final[is_ryan == 1, lm(tip_percent ~ order_type + cashier_name_clean + tender + is_reward + day_of_week)]
+model_ryan_res.vcovHC <- vcovHC(model_ryan_res, type = "HC1")
+rse_model_ryan_res <- sqrt(diag(model_ryan_res.vcovHC))
+
+model_mercury_res <- data_final[is_ryan == 0, lm(tip_percent ~ card_entry_methods + card_brand)]
+model_mercury_res.vcovHC <- vcovHC(model_mercury_res, type = "HC1")
+rse_model_mercury_res <- sqrt(diag(model_mercury_res.vcovHC))
+
+#add residuals to subsetted data
+ryan_data <- data_final[is_ryan == 1, ]
+ryan_data$residuals <- model_ryan_res$residuals
+mercury_data <- data_final[is_ryan == 0, ]
+mercury_data$residuals <- model_mercury_res$residuals
+
+#stack data back together
+residual_data <- rbind(ryan_data, mercury_data)
+
+#fit secondary model on the residuals
+model_6 <- lm(residuals ~ treat + is_ryan, data=residual_data)
+model_6.vcovHC <- vcovHC(model_6, type = "HC1")
+rse_model_6 <- sqrt(diag(model_6.vcovHC))
+
+#combine model results and display
+stargazer(model_0, model_1, model_6,
+   se = list(rse_model_0, rse_model_1, rse_model_6),
+   type = 'latex', header = FALSE, 
+   title = "Regression Results (Abbreviated)",
+   column.labels = c("Base", "Interaction","Final"),
+   keep = c("treat", "is_ryan", "treat:is_ryan", "Constant"),
+  add.lines = list( c("Covariates", "No","No","Yes, but in first stage only")),
+  notes = "All coefficients are reported using robust standard errors."
+ )
+```
+
+```{r Regressions2, results = 'asis'}
+#full model results
+stargazer(model_0, model_1, model_ryan_res, model_mercury_res, model_6,
+   se = list(rse_model_0, rse_model_1, rse_model_ryan_res, rse_model_mercury_res, rse_model_6),
+   type = 'latex', header = FALSE, 
+   title = "Regression Results", no.space = TRUE,
+   column.sep.width = "-1pt", font.size = "small",
+   omit.stat = c("f", "ser"),
+   column.labels = c("Base", "Interaction","Ryan Bros", "Mercury", "Final"),
+  add.lines = list( c("Covariates", "No","No","Yes", "Yes", "Yes, but in first stage only")),
+  notes = "All coefficients are reported using robust standard errors."
+ )
+```
+
+
+**Code for Power Analysis Simulation**
+```{r, include=TRUE}
+# Function to simulate data
+create_data <- function(m_treat = 1.5, m_cont = 1.5, sd_treat = 1, sd_cont = 1, n = 68) { 
+  #roughly equal split between treatment and control
+  outcome_treat <- rnorm(round(n/2, digits = 0), mean = m_treat, sd = sd_treat)
+  remainder <- n-round(n/2, digits = 0)
+  outcome_control <- rnorm(remainder, mean = m_cont, sd = sd_cont)
+  treat_data <- data.frame(outcome_treat, rep(1,length(outcome_treat)))
+  control_data <- data.frame(outcome_control, rep(0,length(outcome_control)))
+  colnames(treat_data) <- c('total','treatment')
+  colnames(control_data) <- c('total','treatment')
+  out_data <- rbind(treat_data, control_data)
+  return(out_data)  
+}
+```
+```{r, include=TRUE} 
+#Function to get p-values using a t-test. no covariates
+pval_t_test <- function(data) { 
+  out <- t.test(total ~ treatment, data = data)$p.value
+  return(out)
+}
+```
+```{r, include=TRUE}
+#Function to  compute power
+power_test <- function(start_n = 10, final_n = 10000, step = 10, 
+                       num_of_p_vals = 1000,
+                       m_treat = m_treat, m_cont = m_cont, 
+                       sd_treat = sd_treat, sd_cont = sd_cont) { 
+    p_values <- c()
+    n_list <- c()
+    #for each given n or sample size    
+    for(data_size in seq(start_n, final_n, step)) {
+      #compute the p-value num_of_p_vals times 
+      for(i in 1:num_of_p_vals) {
+        #create data from the given distribution
+        data <- create_data(m_treat = m_treat, m_cont = m_cont, 
+                            sd_treat = sd_treat, sd_cont = sd_cont, n = data_size)
+        #calculate the p-value
+        p_values <- append(p_values, pval_t_test(data))
+        #save output to list
+        n_list <- append(n_list, data_size)        
+      }
+    }
+    #calculate the % of obs for a given n less than alpha
+    out <- as.data.frame(cbind(n_list, p_values)) %>% group_by(n_list) %>% 
+            summarise(power = mean(p_values < 0.05))
+    return(out)
+}
+```
+
+```{r, include=TRUE}
+#What we observed
+test_1 <- power_test(start_n = 10, final_n = 1000, step = 10, num_of_p_vals = 1000,
+                     m_treat = 11.198204, m_cont = 9.845322, sd_treat = 8.334638, sd_cont = 8.351357)
+#Scenario 1 from Power Analysis
+test_2 <- power_test(start_n = 10, final_n = 1000, step = 10, num_of_p_vals = 1000,
+                     m_treat = 18.84, m_cont = 17.45, sd_treat = 10.26, sd_cont = 8.26)
+#What we observed but a higher mean
+test_3 <- power_test(start_n = 10, final_n = 1000, step = 10, num_of_p_vals = 1000,
+                     m_treat = 21.198204, m_cont = 19.845322, sd_treat = 8.334638, sd_cont = 8.351357)
+```
+```{r, include=TRUE}
+#Combine output and rename for plotting purposes
+final_output <- merge(test_1, test_2, by = "n_list", all.x = TRUE)
+final_output <- merge(final_output, test_3, by = "n_list", all.x = TRUE)
+colnames(final_output) <- c("n", "test_1", "test_2", "test_3")
+```
+```{r, include=TRUE}
+#Plot output
+colors <- c("Experiment" = "blue", "Closest Scenario From Power Analysis" = "red")
+ggplot(data=final_output, aes(x=n)) +
+  geom_line(aes(y = test_1, colour = "Experiment"), size = 1)+
+  geom_line(aes(y = test_2, colour = "Closest Scenario From Power Analysis"), size = 1)+
+  geom_hline(yintercept=0.8, linetype="dashed", color = "black")+
+  geom_text(aes(0, 0.8, label = "80%", vjust = - 1))+
+  labs(x = "Sample Size", y = "Power", title = "Post-Experiment Power Analysis", color = "Legend")+
+   scale_color_manual(values = colors)
+```

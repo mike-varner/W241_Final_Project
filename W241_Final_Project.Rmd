@@ -66,7 +66,7 @@ clean_data <- function(data_table, condition) {
   data_table$is_reward[is.na(data_table$is_reward)] <- 0
   
   #anonymize cashier name
-  data_table$cashier_name_clean <- fct_anon(data_table$cashier_name, prefix = "_")
+  data_table$cashier_name_clean <- data_table$cashier_name
   
   #create a store dummy variable
   data_table[, is_ryan := 1]
